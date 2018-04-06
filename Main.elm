@@ -33,18 +33,23 @@ type alias Obj =
     }
 
 
+type Algorithm = Incremental Float
+
+
 type alias Model =
-    { textDisplay: String
+    { textDisplay: List String
     , objs: List Obj
     , selectedIndex: Int
+    , algorithm: Algorithm
     }
 
 
 init : (Model, Cmd Msg)
 init =
-    ( { textDisplay = "init"
+    ( { textDisplay = []
       , objs = []
       , selectedIndex = -1
+      , algorithm = Incremental 0.75
       }
     , genObj
     )
@@ -54,7 +59,7 @@ init =
 -- Update ----------------------------------------------------------------------
 
 
-type Msg = ObjSelect Int
+type Msg = ObjSelect Int Obj
          | ObjGenerated Obj
          | DecideStopGenerating Float
          | SelectIndex Int
@@ -105,10 +110,103 @@ isValidObj model o =
     && List.all noOverlap model.objs
 
 
+type UniProp = USquare
+             | UCircle
+             | UGreen
+             | UBlue
+             | UOrange
+             | ULeft
+             | URight
+             | UBottom
+             | UTop
+
+uniPropList : List UniProp
+uniPropList = [ USquare
+              , UCircle
+              , UGreen
+              , UBlue
+              , UOrange
+              , ULeft
+              , URight
+              , UBottom
+              , UTop
+              ]
+
+
+type BiProp = BLeft -- TODO
+
+
+type Prop = UniProp UniProp
+          --| BiProp BiProp Obj
+
+
+getUniProp : Obj -> UniProp -> Float
+getUniProp o p =
+    case p of
+        USquare -> if o.objType == Square then 1 else 0
+        UCircle -> if o.objType == Circle then 1 else 0
+        UGreen -> if o.color == Green then 1 else 0
+        UBlue -> if o.color == Blue then 1 else 0
+        UOrange -> if o.color == Orange then 1 else 0
+        ULeft -> (toFloat (gridSize - o.x)) / (toFloat gridSize)
+        URight -> (toFloat (o.x + o.size)) / (toFloat gridSize)
+        UBottom -> (toFloat (gridSize - o.y)) / (toFloat gridSize)
+        UTop -> (toFloat (o.y + o.size)) / (toFloat gridSize)
+
+
+getProp : Obj -> Prop -> Float
+getProp o p =
+    case p of
+        UniProp up -> getUniProp o up
+
+
+getProps : Obj -> List (Prop, Float)
+getProps o = List.map (\x -> (UniProp x, getUniProp o x)) uniPropList
+
+
+gradeProps : Obj -> List Prop -> Algorithm -> Float
+gradeProps o l a =
+    let
+        scores = List.map (getProp o) l
+    in
+        --List.foldl (*) 1.0 scores -- TODO t-norm
+        case a of
+            Incremental t -> if List.all (\x -> x > t) scores then 1.0 else 0.0
+
+
+selectDescriptors : Obj -> List Obj -> Algorithm -> List Prop
+selectDescriptors o allOs a =
+    let
+        d = List.filter (\x -> x /= o) allOs
+    in
+    case a of
+        Incremental t ->
+            let
+                select p (d, selected) =
+                    if not (List.isEmpty d) && getProp o p > t
+                    then
+                        let
+                            dp = List.filter (\x -> getProp x p > t) d
+                        in
+                        if dp /= d
+                        then (dp, p::selected)
+                        else (d, selected)
+                    else (d, selected)
+            in
+                List.foldl select (d, []) (List.map UniProp uniPropList) -- TODO all props
+                    |> Tuple.second
+
+
 update : Msg -> Model -> (Model, Cmd Msg)
 update msg model =
     case msg of
-        ObjSelect i -> ({model | textDisplay = toString i}, Cmd.none)
+        ObjSelect i o -> ({ model
+                              | textDisplay =
+                                [ toString <| getProps o
+                                , toString <| selectDescriptors o model.objs model.algorithm
+                                ]
+                          }
+                         , Cmd.none)
         ObjGenerated o ->
             let
                 modelp = if isValidObj model o
@@ -180,7 +278,7 @@ drawObj model i o =
     style shape
         |> align bottomLeft
         |> shift offsets
-        |> onClick (ObjSelect i)
+        |> onClick (ObjSelect i o)
 
 
 drawScene : Model -> Collage Msg
@@ -228,9 +326,9 @@ view model =
               [ Html.tr []
                     [ Html.td [] [ renderCollage model ]
                     , Html.td []
-                        [ Html.p [] [Html.text <| model.textDisplay]
-                        --, Html.p [] [Html.text <| toString model]
-                        ]
+                        (List.map
+                             (\t -> Html.p [] [Html.text t])
+                             model.textDisplay)
                     ]
               ]
         ]
@@ -257,3 +355,8 @@ main =
       , view = view
       , update = update
       }
+
+
+-- TODO
+-- continuous colors?
+-- landmark system?
