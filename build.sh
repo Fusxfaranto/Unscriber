@@ -1,3 +1,3 @@
 #!/bin/bash
 
-elm-make Main.elm --warn --output=index.html
+elm-make Main.elm --warn --output=unscriber.js
