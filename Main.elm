@@ -141,6 +141,10 @@ logistic : Float -> Float
 logistic f = 1 / (1 + e ^ (-f))
 
 
+searchThreshold : Float
+searchThreshold = 0.6
+
+
 type BiProp = BLeft
 
 
@@ -174,14 +178,26 @@ uniPropList = [ USquare
               ]
 
 
-getUniProp : Obj -> UniProp -> Float
-getUniProp o p =
+getUniProp : Obj -> List Obj -> Algorithm -> UniProp -> Float
+getUniProp o os a p =
     case p of
         UBiProp bp other ->
-            case bp of
-                BLeft -> -((hDist o other) / (dist o other) ^ 2) * (toFloat gridSize) / 10
-                --BLeft -> ((1 / (hDist o other)) / -2 + 0.5) / (dist o other)
-                         |> logistic
+            let
+                newOs = List.filter (\x -> x /= other) os
+                bScore =
+                    case bp of
+                        BLeft -> -((hDist o other) / (dist o other) ^ 2) * (toFloat gridSize) / 5
+                              |> logistic
+            in
+            if bScore > searchThreshold
+            then bScore *
+                (gradeProps
+                     other
+                     (o::newOs)
+                     (selectDescriptors other newOs a)
+                     a
+                )
+            else 0
         USquare -> if o.objType == Square then 1 else 0
         UCircle -> if o.objType == Circle then 1 else 0
         UGreen -> if o.color == Green then 1 else 0
@@ -198,58 +214,77 @@ getUniPropList os = List.append uniPropList
                     <| lift2 (\x y -> UBiProp x y) biPropList os
 
 
-getProps : Obj -> List Obj -> List (UniProp, Float)
-getProps o allOs = List.map (\x -> (x, getUniProp o x))
-                   (getUniPropList <| List.filter (\x -> x /= o) allOs)
-                       |> List.sortBy (negate << Tuple.second)
+getProps : Obj -> List Obj -> List UniProp -> Algorithm -> List (UniProp, Float)
+getProps o os l a =
+        List.map (\x -> (x, getUniProp o os a x)) l
+                |> List.sortBy (negate << Tuple.second)
 
 
-gradeProps : Obj -> List UniProp -> Algorithm -> Float
-gradeProps o l a =
+gradePropsWithoutContext : Obj -> List Obj -> List UniProp -> Algorithm -> Float
+gradePropsWithoutContext o os l a =
     let
-        scores = List.map (getUniProp o) l
+        scores = List.map Tuple.second <| getProps o os l a
     in
         --List.foldl (*) 1.0 scores -- TODO t-norm
         case a of
             Incremental t ->
-                if List.all (\x -> x > t) scores
+                if List.all (\x -> x > t) scores -- TODO is this ever false?
                 then 1.0
                 else 0.0
 
 
-selectDescriptors : Obj -> List Obj -> Algorithm -> List UniProp
-selectDescriptors o allOs a =
+gradeProps : Obj -> List Obj -> List UniProp -> Algorithm -> Float
+gradeProps o os l a =
     let
-        d = List.filter (\x -> x /= o) allOs
+        oScore = gradePropsWithoutContext o os l a
+        otherScores = List.map (\x -> gradePropsWithoutContext x os l a) os
+                      |> List.sortBy negate
     in
+        case a of
+            Incremental t ->
+                1 - (List.filter (\x -> x >= oScore) otherScores
+                         |> List.length
+                         |> toFloat
+                    ) * 0.1
+                    |> max 0
+
+
+selectDescriptors : Obj -> List Obj -> Algorithm -> List UniProp
+selectDescriptors o os a =
     case a of
         Incremental t ->
             let
                 select p (d, selected) =
-                    if not (List.isEmpty d) && getUniProp o p > t
+                    if not (List.isEmpty d) && getUniProp o d a p > t
                     then
                         let
-                            dp = List.filter (\x -> getUniProp x p > t) d
+                            dp = List.filter (\x -> getUniProp x d a p > t) d
                         in
                         if dp /= d
                         then (dp, p::selected)
                         else (d, selected)
                     else (d, selected)
             in
-                List.foldl select (d, []) (getUniPropList d)
+                List.foldl select (os, []) (getUniPropList os)
                     |> Tuple.second
 
 
 update : Msg -> Model -> (Model, Cmd Msg)
 update msg model =
     case msg of
-        ObjSelect i o -> ({ model
-                              | textDisplay =
-                                [ toString <| getProps o model.objs
-                                , toString <| selectDescriptors o model.objs model.algorithm
-                                ]
-                          }
-                         , Cmd.none)
+        ObjSelect i o ->
+            let
+                d = List.filter (\x -> x /= o) model.objs
+                descriptors = selectDescriptors o d model.algorithm
+            in
+            ({ model
+                 | textDisplay =
+                   [ toString <| getProps o d (getUniPropList d) model.algorithm
+                   , toString <| descriptors
+                   , toString <| gradeProps o d descriptors model.algorithm
+                   ]
+             }
+            , Cmd.none)
         ObjGenerated o ->
             let
                 modelp = if isValidObj model o
@@ -261,7 +296,7 @@ update msg model =
             in
             (modelp, nextAction)
         DecideStopGenerating f ->
-            if f > 0.9
+            if f > 0.6
             then (model
                  , Random.generate SelectIndex
                      <| Random.int 0
