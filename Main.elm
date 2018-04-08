@@ -269,6 +269,58 @@ selectDescriptors o os a =
                     |> Tuple.second
 
 
+type SyntaxTree = Leaf String
+                | Branch SyntaxTree SyntaxTree
+
+
+type BranchType = Left
+                | Right
+
+
+describeProp : UniProp -> List Obj -> Algorithm -> (SyntaxTree, BranchType)
+describeProp p os a =
+    case p of
+        UBiProp bp other ->
+            let
+                newOs = List.filter (\x -> x /= other) os
+                t = case bp of
+                        BLeft -> Branch
+                                 (Leaf "left of the")
+                                 (describeTree (selectDescriptors other newOs a) os a)
+            in
+                (t, Right)
+        USquare -> (Leaf "square", Left)
+        UCircle -> (Leaf "round",  Left)
+        UGreen  -> (Leaf "green",  Left)
+        UBlue   -> (Leaf "blue",   Left)
+        UOrange -> (Leaf "orange", Left)
+        ULeft   -> (Leaf "left",   Left)
+        URight  -> (Leaf "right",  Left)
+        UBottom -> (Leaf "bottom", Left)
+        UTop    -> (Leaf "top",    Left)
+
+
+describeTree : List UniProp -> List Obj -> Algorithm -> SyntaxTree
+describeTree ps os a =
+    case ps of
+        []   -> Leaf "object"
+        x::xs -> case describeProp x os a of
+                     (t, Left) -> Branch t (describeTree xs os a)
+                     (t, Right) -> Branch (describeTree xs os a) t
+
+
+flattenTree : SyntaxTree -> String
+flattenTree t =
+    case t of
+        Leaf s -> s
+        Branch t1 t2 -> (flattenTree t1) ++ " " ++ (flattenTree t2)
+
+
+describe : List UniProp -> List Obj -> Algorithm -> String
+describe ps os a =
+    "The " ++ flattenTree (describeTree ps os a)
+
+
 update : Msg -> Model -> (Model, Cmd Msg)
 update msg model =
     case msg of
@@ -282,6 +334,8 @@ update msg model =
                    [ toString <| getProps o d (getUniPropList d) model.algorithm
                    , toString <| descriptors
                    , toString <| gradeProps o d descriptors model.algorithm
+                   , toString <| describeTree descriptors d model.algorithm
+                   , toString <| describe descriptors d model.algorithm
                    ]
              }
             , Cmd.none)
