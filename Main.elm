@@ -8,8 +8,9 @@ import Color exposing (Color, green, orange, blue, gray, red)
 import Css
 --import Html exposing (Html)
 import Html.Styled as Html exposing (Html, fromUnstyled)
-import Html.Styled.Attributes exposing (css)
-import List.Extra exposing (lift2)
+import Html.Styled.Attributes as Attributes exposing (css, type_, value)
+import Html.Styled.Events as Events exposing (onInput)
+import List.Extra exposing (lift2, maximumBy)
 import Random as Random exposing (Generator, generate)
 
 
@@ -36,6 +37,7 @@ type alias Obj =
 
 
 type Algorithm = Incremental Float
+               | Fuzzy
 
 
 type alias Model =
@@ -43,18 +45,24 @@ type alias Model =
     , objs: List Obj
     , selectedIndex: Int
     , algorithm: Algorithm
+    , gridSize : Int
+    , numObjects : Int
     }
 
 
 init : (Model, Cmd Msg)
 init =
-    ( { textDisplay = []
-      , objs = []
-      , selectedIndex = -1
-      , algorithm = Incremental 0.65
-      }
-    , genObj
-    )
+    let
+        model =
+            { textDisplay = []
+            , objs = []
+            , selectedIndex = -1
+            , algorithm = Fuzzy
+            , gridSize = 35
+            , numObjects = 30
+            }
+    in
+        (model, genObj model)
 
 
 
@@ -63,12 +71,18 @@ init =
 
 type Msg = ObjSelect Int Obj
          | ObjGenerated Obj
-         | DecideStopGenerating Float
+         | StartGeneration
          | SelectIndex Int
+         | ChooseAlgorithm String
+         | SetNumObjects String
 
 
-objGenerator : Generator Obj
-objGenerator =
+maxSize : Model -> Int
+maxSize model = model.gridSize // 5
+
+
+objGenerator : Model -> Generator Obj
+objGenerator model =
     let
         f t x y s c =
             { objType =
@@ -89,14 +103,14 @@ objGenerator =
     in
     Random.map5 f
         (Random.int 0 1)
-        (Random.int 0 (gridSize - 1))
-        (Random.int 0 (gridSize - 1))
-        (Random.int 1 (gridSize // 5))
+        (Random.int 0 (model.gridSize - 1))
+        (Random.int 0 (model.gridSize - 1))
+        (Random.int 1 (maxSize model))
         (Random.int 0 2)
 
 
-genObj : Cmd Msg
-genObj = generate ObjGenerated objGenerator
+genObj : Model -> Cmd Msg
+genObj model = generate ObjGenerated (objGenerator model)
 
 
 isValidObj : Model -> Obj -> Bool
@@ -107,8 +121,8 @@ isValidObj model o =
                           o.x >= other.x + other.size ||
                           o.y >= other.y + other.size
     in
-    (o.x + o.size <= gridSize)
-    && (o.y + o.size <= gridSize)
+    (o.x + o.size <= model.gridSize)
+    && (o.y + o.size <= model.gridSize)
     && List.all noOverlap model.objs
 
 
@@ -146,10 +160,16 @@ searchThreshold = 0.6
 
 
 type BiProp = BLeft
+            | BRight
+            | BBelow
+            | BAbove
 
 
 biPropList : List BiProp
 biPropList = [ BLeft
+             , BRight
+             , BBelow
+             , BAbove
              ]
 
 
@@ -159,10 +179,13 @@ type UniProp = UBiProp BiProp Obj
              | UGreen
              | UBlue
              | UOrange
+             | USmall
+             | ULarge
              | ULeft
              | URight
              | UBottom
              | UTop
+             | UMiddle
 
 
 uniPropList : List UniProp
@@ -171,42 +194,78 @@ uniPropList = [ USquare
               , UGreen
               , UBlue
               , UOrange
+              , USmall
+              , ULarge
               , ULeft
               , URight
               , UBottom
               , UTop
+              , UMiddle
               ]
 
 
-getUniProp : Obj -> List Obj -> Algorithm -> UniProp -> Float
-getUniProp o os a p =
+unconditionalProps : List UniProp
+unconditionalProps = [ USquare
+                     , UCircle
+                     , UGreen
+                     , UBlue
+                     , UOrange
+                     ]
+
+
+rateDist : (Obj -> Obj -> Float) -> Obj -> Obj -> Float
+rateDist f a b = ((f a b) / (dist a b) ^ 2) / 5
+
+
+getUniProp : Obj -> List Obj -> Model -> UniProp -> Float
+getUniProp o os model p =
+    let
+        g = toFloat model.gridSize
+    in
     case p of
         UBiProp bp other ->
-            let
-                newOs = List.filter (\x -> x /= other) os
-                bScore =
-                    case bp of
-                        BLeft -> -((hDist o other) / (dist o other) ^ 2) * (toFloat gridSize) / 5
-                              |> logistic
-            in
-            if bScore > searchThreshold
-            then bScore *
-                (gradeProps
-                     other
-                     (o::newOs)
-                     (selectDescriptors other newOs a)
-                     a
-                )
-            else 0
+            case model.algorithm of
+                Incremental t -> 0 -- not really any good way to do bivalence with "pure" incremental alg afaik
+                Fuzzy ->
+                    let
+                        newOs = List.filter (\x -> x /= other) os
+                        bScore =
+                            (case bp of
+                                 BLeft  -> -(rateDist hDist o other) * g
+                                 BRight -> rateDist hDist o other * g
+                                 BBelow -> -(rateDist hDist o other) * g
+                                 BAbove -> rateDist hDist o other * g
+                            )
+                               |> logistic
+                    in
+                        if bScore > searchThreshold
+                        then bScore *
+                            (gradeProps
+                                 other
+                                 (o::newOs)
+                                 (selectDescriptors other newOs model)
+                                 model
+                            )
+                        else 0
         USquare -> if o.objType == Square then 1 else 0
         UCircle -> if o.objType == Circle then 1 else 0
-        UGreen -> if o.color == Green then 1 else 0
-        UBlue -> if o.color == Blue then 1 else 0
+        UGreen  -> if o.color == Green then 1 else 0
+        UBlue   -> if o.color == Blue then 1 else 0
         UOrange -> if o.color == Orange then 1 else 0
-        ULeft -> (toFloat (gridSize - o.x)) / (toFloat gridSize)
-        URight -> (toFloat (o.x + o.size)) / (toFloat gridSize)
-        UBottom -> (toFloat (gridSize - o.y)) / (toFloat gridSize)
-        UTop -> (toFloat (o.y + o.size)) / (toFloat gridSize)
+        USmall  -> (toFloat (maxSize model - o.size)) / (toFloat (maxSize model - 1))
+        ULarge  -> (toFloat (o.size - 1)) / (toFloat (maxSize model - 1))
+        ULeft   -> (g - (toFloat o.x)) / g
+        URight  -> (toFloat (o.x + o.size)) / g
+        UBottom -> (g - (toFloat o.y)) / g
+        UTop    -> (toFloat (o.y + o.size)) / g
+        UMiddle ->
+            let
+                (x, y) = objCenter o
+                gridCenter = (g / 2)
+            in
+            (x - gridCenter) ^ 2 + (y - gridCenter) ^ 2
+                |> sqrt
+                |> \x -> 1 - x / g
 
 
 getUniPropList : List Obj -> List UniProp
@@ -214,51 +273,61 @@ getUniPropList os = List.append uniPropList
                     <| lift2 (\x y -> UBiProp x y) biPropList os
 
 
-getProps : Obj -> List Obj -> List UniProp -> Algorithm -> List (UniProp, Float)
-getProps o os l a =
-        List.map (\x -> (x, getUniProp o os a x)) l
+getProps : Obj -> List Obj -> List UniProp -> Model -> List (UniProp, Float)
+getProps o os l model =
+        List.map (\x -> (x, getUniProp o os model x)) l
                 |> List.sortBy (negate << Tuple.second)
 
 
-gradePropsWithoutContext : Obj -> List Obj -> List UniProp -> Algorithm -> Float
-gradePropsWithoutContext o os l a =
+gradePropsWithoutContext : Obj -> List Obj -> List UniProp -> Model -> Float
+gradePropsWithoutContext o os l model =
     let
-        scores = List.map Tuple.second <| getProps o os l a
+        scores = List.map Tuple.second <| getProps o os l model
     in
-        --List.foldl (*) 1.0 scores -- TODO t-norm
-        case a of
+        case model.algorithm of
             Incremental t ->
                 if List.all (\x -> x > t) scores -- TODO is this ever false?
                 then 1.0
                 else 0.0
+            Fuzzy ->
+                List.foldl (*) 1.0 scores -- TODO better t-norm?
 
 
-gradeProps : Obj -> List Obj -> List UniProp -> Algorithm -> Float
-gradeProps o os l a =
+gradeProps : Obj -> List Obj -> List UniProp -> Model -> Float
+gradeProps o os l model =
     let
-        oScore = gradePropsWithoutContext o os l a
-        otherScores = List.map (\x -> gradePropsWithoutContext x os l a) os
+        oScore = gradePropsWithoutContext o os l model
+        otherScores = List.map (\x -> gradePropsWithoutContext x os l model) os
                       |> List.sortBy negate
     in
-        case a of
-            Incremental t ->
-                1 - (List.filter (\x -> x >= oScore) otherScores
+        case model.algorithm of
+            Incremental t -> oScore
+            Fuzzy -> -- TODO something smarter
+                oScore - (List.filter (\x -> x >= oScore) otherScores
                          |> List.length
                          |> toFloat
-                    ) * 0.1
+                         ) * 0.5
                     |> max 0
 
 
-selectDescriptors : Obj -> List Obj -> Algorithm -> List UniProp
-selectDescriptors o os a =
-    case a of
+selectDescriptors : Obj -> List Obj -> Model -> List UniProp
+selectDescriptors o os model =
+    let
+        unconditionals = List.filter
+                         (\x -> getUniProp o os model x > 0.5)
+                         unconditionalProps
+        notUnconditionals = List.filter
+                            (\x -> not (List.member x unconditionalProps))
+                            uniPropList
+    in
+    case model.algorithm of
         Incremental t ->
             let
                 select p (d, selected) =
-                    if not (List.isEmpty d) && getUniProp o d a p > t
+                    if not (List.isEmpty d) && getUniProp o d model p > t
                     then
                         let
-                            dp = List.filter (\x -> getUniProp x d a p > t) d
+                            dp = List.filter (\x -> getUniProp x d model p > t) d
                         in
                         if dp /= d
                         then (dp, p::selected)
@@ -267,6 +336,38 @@ selectDescriptors o os a =
             in
                 List.foldl select (os, []) (getUniPropList os)
                     |> Tuple.second
+        Fuzzy ->
+            let
+                filterDs : List Obj -> List UniProp -> List Obj
+                filterDs d ps =
+                    let
+                        currScore = gradePropsWithoutContext o os ps model
+                    in
+                    List.filter
+                    (\x -> gradePropsWithoutContext x os ps model >= currScore) -- TODO threshold?
+                    d
+
+                select : List Obj -> List UniProp -> List UniProp -> List UniProp
+                select d selected unselected =
+                    case d of
+                        [] -> selected
+                        _  ->
+                            let
+                                newP =
+                                    maximumBy
+                                    (\x -> gradeProps o os (x::selected) model)
+                                    unselected
+                            in
+                                case newP of
+                                    Nothing -> selected
+                                    Just p ->
+                                        let
+                                            newSelected = p::selected
+                                            newUnselected = List.filter (\x -> x /= p) unselected
+                                        in
+                                        select (filterDs d newSelected) newSelected newUnselected
+            in
+                select (filterDs os unconditionals) (List.reverse unconditionals) notUnconditionals
 
 
 type SyntaxTree = Leaf String
@@ -277,36 +378,46 @@ type BranchType = Left
                 | Right
 
 
-describeProp : UniProp -> List Obj -> Algorithm -> (SyntaxTree, BranchType)
-describeProp p os a =
+describeProp : UniProp -> List Obj -> Model -> (SyntaxTree, BranchType)
+describeProp p os model =
     case p of
         UBiProp bp other ->
             let
                 newOs = List.filter (\x -> x /= other) os
-                t = case bp of
-                        BLeft -> Branch
-                                 (Leaf "left of the")
-                                 (describeTree (selectDescriptors other newOs a) os a)
+                leaf = case bp of
+                           BLeft  -> (Leaf "left of the")
+                           BRight -> (Leaf "right of the")
+                           BBelow -> (Leaf "below the")
+                           BAbove -> (Leaf "above the")
             in
-                (t, Right)
+                ( Branch
+                     leaf
+                     (describeTree (selectDescriptors other newOs model) os model)
+                , Right
+                )
         USquare -> (Leaf "square", Left)
         UCircle -> (Leaf "round",  Left)
         UGreen  -> (Leaf "green",  Left)
         UBlue   -> (Leaf "blue",   Left)
         UOrange -> (Leaf "orange", Left)
+        USmall  -> (Leaf "small",  Left)
+        ULarge  -> (Leaf "large",  Left)
         ULeft   -> (Leaf "left",   Left)
         URight  -> (Leaf "right",  Left)
         UBottom -> (Leaf "bottom", Left)
         UTop    -> (Leaf "top",    Left)
+        UMiddle -> (Leaf "middle", Left)
 
 
-describeTree : List UniProp -> List Obj -> Algorithm -> SyntaxTree
-describeTree ps os a =
+describeTree : List UniProp -> List Obj -> Model -> SyntaxTree
+describeTree ps os model =
     case ps of
-        []   -> Leaf "object"
-        x::xs -> case describeProp x os a of
-                     (t, Left) -> Branch t (describeTree xs os a)
-                     (t, Right) -> Branch (describeTree xs os a) t
+        []    -> Leaf "object"
+        USquare::[] -> Leaf "square"
+        UCircle::[] -> Leaf "circle"
+        x::xs -> case describeProp x os model of
+                     (t, Left) -> Branch t (describeTree xs os model)
+                     (t, Right) -> Branch (describeTree xs os model) t
 
 
 flattenTree : SyntaxTree -> String
@@ -316,9 +427,9 @@ flattenTree t =
         Branch t1 t2 -> (flattenTree t1) ++ " " ++ (flattenTree t2)
 
 
-describe : List UniProp -> List Obj -> Algorithm -> String
-describe ps os a =
-    "The " ++ flattenTree (describeTree ps os a)
+describe : List UniProp -> List Obj -> Model -> String
+describe ps os model =
+    "The " ++ flattenTree (describeTree ps os model)
 
 
 update : Msg -> Model -> (Model, Cmd Msg)
@@ -327,36 +438,45 @@ update msg model =
         ObjSelect i o ->
             let
                 d = List.filter (\x -> x /= o) model.objs
-                descriptors = selectDescriptors o d model.algorithm
+                descriptors = selectDescriptors o d model
             in
             ({ model
                  | textDisplay =
-                   [ toString <| getProps o d (getUniPropList d) model.algorithm
+                   [ toString <| getProps o d (getUniPropList d) model
                    , toString <| descriptors
-                   , toString <| gradeProps o d descriptors model.algorithm
-                   , toString <| describeTree descriptors d model.algorithm
-                   , toString <| describe descriptors d model.algorithm
+                   , toString <| gradeProps o d descriptors model
+                   , toString <| describeTree descriptors d model
+                   , toString <| describe descriptors d model
                    ]
              }
             , Cmd.none)
+        StartGeneration ->
+            ({model | objs = []}, genObj model)
         ObjGenerated o ->
             let
                 modelp = if isValidObj model o
                          then {model | objs = o::model.objs}
                          else model
-                nextAction = if List.length modelp.objs < 30
-                             then genObj
-                             else Random.generate DecideStopGenerating (Random.float 0 1)
+                nextAction = if List.length modelp.objs < modelp.numObjects
+                             then genObj modelp
+                             else Random.generate SelectIndex
+                                 <| Random.int 0
+                                 <| List.length modelp.objs
             in
             (modelp, nextAction)
-        DecideStopGenerating f ->
-            if f > 0.6
-            then (model
-                 , Random.generate SelectIndex
-                     <| Random.int 0
-                     <| List.length model.objs)
-            else (model, genObj)
         SelectIndex i -> ({model | selectedIndex = i}, Cmd.none)
+        ChooseAlgorithm s -> ({model | algorithm =
+                                   case s of
+                                       "Fuzzy" -> Fuzzy
+                                       "Incremental" -> Incremental 0.65
+                                       _ -> Debug.crash "bad option"
+                              }, Cmd.none)
+        SetNumObjects s ->
+            case String.toInt s of
+                Err _ -> (model, Cmd.none)
+                Ok n  -> ({model | numObjects = n, objs = []}, genObj model)
+
+
 
 
 
@@ -365,10 +485,6 @@ update msg model =
 
 spacerLen : Float
 spacerLen = 15.0
-
-
-gridSize : Int
-gridSize = 40
 
 
 drawGrid : Int -> Collage Msg
@@ -420,7 +536,7 @@ drawScene model = stack <| List.indexedMap (drawObj model) model.objs
 renderCollage : Model -> Html Msg
 renderCollage model =
     let
-        grid = drawGrid gridSize
+        grid = drawGrid model.gridSize
         base =
             stack
             [ drawScene model
@@ -465,7 +581,7 @@ view model =
                         [ Html.div
                               [ css
                                 [ Css.overflow Css.scroll
-                                , Css.height (Css.px (toFloat gridSize * spacerLen))
+                                , Css.height (Css.px (toFloat model.gridSize * spacerLen))
                                 ]
                               ]
                               [ Html.pre []
@@ -476,6 +592,47 @@ view model =
                         ]
                     ]
               ]
+        --, Html.br [] []
+        , Html.div []
+            [ Html.table []
+                  [ Html.tr []
+                        [ Html.td [] []
+                        , Html.td [] [Html.text "Algorithm:"]
+                        , Html.td [] [Html.text "Number of Objects:"]
+                        ]
+
+                  , Html.tr []
+                        [ Html.td []
+                              [ Html.button
+                                    [Events.onClick StartGeneration]
+                                    [Html.text "Regenerate"]
+                              ]
+                        , Html.td []
+                              [ Html.select
+                                    [ onInput ChooseAlgorithm
+                                    ]
+                                    (List.map
+                                         (\x -> Html.option [value x] [Html.text x])
+                                         ["Fuzzy", "Incremental"]
+                                    )
+                              ]
+                        , Html.td []
+                              [ Html.select
+                                    [ onInput SetNumObjects
+                                    ]
+                                    (List.map
+                                         ((\x ->
+                                               Html.option
+                                               [ value x
+                                               , Attributes.selected (x == "30")
+                                               ]
+                                               [Html.text x]) << toString)
+                                         [5, 10, 20, 30, 40]
+                                    )
+                              ]
+                        ]
+                  ]
+            ]
         ]
 
 
@@ -501,7 +658,3 @@ main =
       , update = update
       }
 
-
--- TODO
--- continuous colors?
--- landmark system?
