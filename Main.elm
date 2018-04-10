@@ -43,6 +43,7 @@ type Algorithm = Incremental Float
 type alias Model =
     { textDisplay: List String
     , objs: List Obj
+    , objUniScores : List (List UniProp, Float)
     , selectedIndex: Int
     , algorithm: Algorithm
     , gridSize : Int
@@ -56,6 +57,7 @@ init =
         model =
             { textDisplay = []
             , objs = []
+            , objUniScores = []
             , selectedIndex = -1
             , algorithm = Fuzzy 0.7
             , gridSize = 35
@@ -72,7 +74,6 @@ init =
 type Msg = ObjSelect Int Obj
          | ObjGenerated Obj
          | StartGeneration
-         | SelectIndex Int
          | ChooseAlgorithm String
          | SetNumObjects String
 
@@ -151,6 +152,15 @@ hDist a b =
     ax - bx
 
 
+vDist : Obj -> Obj -> Float
+vDist a b =
+    let
+        (ax, ay) = objCenter a
+        (bx, by) = objCenter b
+    in
+    ay - by
+
+
 logistic : Float -> Float
 logistic f = 1 / (1 + e ^ (-f))
 
@@ -169,7 +179,7 @@ biPropList = [ BLeft
              ]
 
 
-type UniProp = UBiProp BiProp Obj
+type UniProp = UBiProp BiProp Obj (List UniProp, Float)
              | USquare
              | UCircle
              | UGreen
@@ -213,36 +223,31 @@ rateDist : (Obj -> Obj -> Float) -> Obj -> Obj -> Float
 rateDist f a b = ((f a b) / (dist a b) ^ 2) / 5
 
 
-getUniProp : Obj -> List Obj-> UniProp -> Model -> Float
-getUniProp o os p model =
+getUniProp : Obj -> UniProp -> Model -> Float
+getUniProp o p model =
     let
         g = toFloat model.gridSize
     in
     case p of
-        UBiProp bp other ->
+        UBiProp bp other (_, otherScore) ->
             case model.algorithm of
-                Incremental t -> 0 -- not really any good way to do bivalence with "pure" incremental alg afaik
+                Incremental t -> 0 -- TODO can probably do bivalence with landmarks
                 Fuzzy t ->
-                    let
-                        newOs = List.filter (\x -> x /= other) os
-                        bScore =
-                            (case bp of
-                                 BLeft  -> -(rateDist hDist o other) * g
-                                 BRight -> rateDist hDist o other * g
-                                 BBelow -> -(rateDist hDist o other) * g
-                                 BAbove -> rateDist hDist o other * g
-                            )
-                               |> logistic
-                    in
-                        if False --bScore > t
-                        then bScore *
-                            (gradeProps
-                                 other
-                                 (o::newOs)
-                                 (selectDescriptors other newOs model)
-                                 model
-                            )
-                        else 0
+                    if o == other
+                    then 0 -- TODO i think this is a good starting point but not sure if this is the best way to handle this
+                    else
+                        let
+                            bScore =
+                                (case bp of
+                                     BLeft  -> -(rateDist hDist o other) * g
+                                     BRight -> rateDist hDist o other * g
+                                     BBelow -> -(rateDist vDist o other) * g
+                                     BAbove -> rateDist vDist o other * g
+                                )
+                                   |> logistic
+                                   --|> Debug.log "bScore"
+                        in
+                            otherScore * bScore -- TODO something smarter
         USquare -> if o.objType == Square then 1 else 0
         UCircle -> if o.objType == Circle then 1 else 0
         UGreen  -> if o.color == Green then 1 else 0
@@ -264,14 +269,17 @@ getUniProp o os p model =
                 |> \x -> 1 - x / g
 
 
-getUniPropList : List Obj -> List UniProp
-getUniPropList os = List.append uniPropList
-                    <| lift2 (\x y -> UBiProp x y) biPropList os
+getUniPropListWithLandmarks : Model -> List UniProp
+getUniPropListWithLandmarks model =
+    List.map2 (\x (y, z) -> (x, y, z)) model.objs model.objUniScores
+        |> lift2 (\bp (o, ups, oScore) -> UBiProp bp o (ups, oScore)) biPropList
+        |> List.append uniPropList
+        |> Debug.log "props"
 
 
-getProps : Obj -> List Obj -> List UniProp -> Model -> List (UniProp, Float)
-getProps o os l model =
-        List.map (\x -> (x, getUniProp o os x model)) l
+getProps : Obj -> List UniProp -> Model -> List (UniProp, Float)
+getProps o l model =
+        List.map (\x -> (x, getUniProp o x model)) l
                 |> List.sortBy (negate << Tuple.second)
 
 
@@ -279,10 +287,10 @@ fuzzyTNorm : Float -> Float -> Float
 fuzzyTNorm a b = a * b -- TODO better t-norm?
 
 
-gradePropsWithoutContext : Obj -> List Obj -> List UniProp -> Model -> Float
-gradePropsWithoutContext o os l model =
+gradePropsWithoutContext : Obj -> List UniProp -> Model -> Float
+gradePropsWithoutContext o l model =
     let
-        scores = List.map Tuple.second <| getProps o os l model
+        scores = List.map Tuple.second <| getProps o l model
     in
         case model.algorithm of
             Incremental t ->
@@ -296,7 +304,7 @@ gradePropsWithoutContext o os l model =
 gradeProps : Obj -> List Obj -> List UniProp -> Model -> Float
 gradeProps o os l model =
     let
-        oScore = gradePropsWithoutContext o os l model
+        oScore = gradePropsWithoutContext o l model
         -- otherScores = List.map (\x -> gradePropsWithoutContext x os l model) os
         --               |> List.sortBy negate
     in
@@ -304,7 +312,7 @@ gradeProps o os l model =
             Incremental t -> oScore
             Fuzzy t ->
                 case List.map
-                    (\x -> gradePropsWithoutContext x os l model)
+                    (\x -> gradePropsWithoutContext x l model)
                     os
                         |> List.maximum
                 of
@@ -316,14 +324,14 @@ gradeProps o os l model =
 gradeSingleProp : Obj -> List Obj -> UniProp -> Float -> List Float -> Model -> (Float, List Float)
 gradeSingleProp o os p oScore osScores model =
     let
-        oScoreNew = fuzzyTNorm oScore (getUniProp o os p model)
+        oScoreNew = fuzzyTNorm oScore (getUniProp o p model)
     in
     case model.algorithm of
         Incremental t -> Debug.crash "don't"
         Fuzzy t ->
             let
                 osScoresNew = List.map2
-                              (\x y -> fuzzyTNorm y (getUniProp x os p model))
+                              (\x y -> fuzzyTNorm y (getUniProp x p model))
                               os
                               osScores
             in
@@ -335,11 +343,11 @@ gradeSingleProp o os p oScore osScores model =
 
 
 
-selectDescriptors : Obj -> List Obj -> Model -> List UniProp
-selectDescriptors o os model =
+selectDescriptors : Obj -> List Obj -> List UniProp -> Model -> List UniProp
+selectDescriptors o os possProps model =
     let
         unconditionals = List.filter
-                         (\x -> getUniProp o os x model > 0.5)
+                         (\x -> getUniProp o x model > 0.5)
                          unconditionalProps
                              |> List.reverse
     in
@@ -347,17 +355,17 @@ selectDescriptors o os model =
         Incremental t ->
             let
                 select p (d, selected) =
-                    if not (List.isEmpty d) && getUniProp o d p model > t
+                    if not (List.isEmpty d) && getUniProp o p model > t
                     then
                         let
-                            dp = List.filter (\x -> getUniProp x d p model > t) d
+                            dp = List.filter (\x -> getUniProp x p model > t) d
                         in
                         if dp /= d
                         then (dp, p::selected)
                         else (d, selected)
                     else (d, selected)
             in
-                List.foldl select (os, []) (getUniPropList os)
+                List.foldl select (os, []) possProps
                     |> Tuple.second
         Fuzzy t ->
             let
@@ -378,7 +386,7 @@ selectDescriptors o os model =
                             maximumBy
                             (\x -> Tuple.first (gradeSingleProp o os x oScore osScores model))
                             unselected
-                                --|> Debug.log "newP"
+                                |> Debug.log "newP"
                     in
                         case newP of
                             Nothing -> Debug.crash "this shouldn't ever happen in practice" -- TODO probably remove
@@ -387,7 +395,7 @@ selectDescriptors o os model =
                                     newSelected = p::selected
                                     newUnselected = List.filter (\x -> x /= p) unselected
                                     (oScoreCNew, osScoresNew) = gradeSingleProp o os p oScore osScores model
-                                                              --|> Debug.log "(oScoreCNew, osScoresNew)"
+                                                              |> Debug.log "(oScoreCNew, osScoresNew)"
                                 in
                                     if oScoreCNew <= oScoreC
                                     then selected
@@ -395,7 +403,7 @@ selectDescriptors o os model =
                                         select
                                         newSelected
                                         newUnselected
-                                        (fuzzyTNorm oScore (getUniProp o os p model))
+                                        (fuzzyTNorm oScore (getUniProp o p model))
                                         osScoresNew
                                         oScoreCNew
             in
@@ -404,10 +412,10 @@ selectDescriptors o os model =
                 unconditionals
                 (List.filter
                      (\x -> not (List.member x unconditionalProps))
-                     (getUniPropList os)
+                     possProps
                 )
-                (gradePropsWithoutContext o os unconditionals model)
-                (List.map (\x -> gradePropsWithoutContext x os unconditionals model) os) -- TODO i don't think passing os to gradePropsWithoutContext is correct here
+                (gradePropsWithoutContext o unconditionals model)
+                (List.map (\x -> gradePropsWithoutContext x unconditionals model) os)
                 (gradeProps o os unconditionals model)
 
 
@@ -419,12 +427,11 @@ type BranchType = Left
                 | Right
 
 
-describeProp : UniProp -> List Obj -> Model -> (SyntaxTree, BranchType)
-describeProp p os model =
+describeProp : UniProp -> (SyntaxTree, BranchType)
+describeProp p =
     case p of
-        UBiProp bp other ->
+        UBiProp bp other (otherProps, _) ->
             let
-                newOs = List.filter (\x -> x /= other) os
                 leaf = case bp of
                            BLeft  -> (Leaf "left of the")
                            BRight -> (Leaf "right of the")
@@ -433,7 +440,7 @@ describeProp p os model =
             in
                 ( Branch
                      leaf
-                     (describeTree (selectDescriptors other newOs model) os model)
+                     (describeTree otherProps)
                 , Right
                 )
         USquare -> (Leaf "square", Left)
@@ -450,15 +457,15 @@ describeProp p os model =
         UMiddle -> (Leaf "middle", Left)
 
 
-describeTree : List UniProp -> List Obj -> Model -> SyntaxTree
-describeTree ps os model =
+describeTree : List UniProp -> SyntaxTree
+describeTree ps =
     case ps of
         []    -> Leaf "object"
         USquare::[] -> Leaf "square"
         UCircle::[] -> Leaf "circle"
-        x::xs -> case describeProp x os model of
-                     (t, Left) -> Branch t (describeTree xs os model)
-                     (t, Right) -> Branch (describeTree xs os model) t
+        x::xs -> case describeProp x of
+                     (t, Left) -> Branch t (describeTree xs)
+                     (t, Right) -> Branch (describeTree xs) t
 
 
 flattenTree : SyntaxTree -> String
@@ -468,9 +475,9 @@ flattenTree t =
         Branch t1 t2 -> (flattenTree t1) ++ " " ++ (flattenTree t2)
 
 
-describe : List UniProp -> List Obj -> Model -> String
-describe ps os model =
-    "The " ++ flattenTree (describeTree ps os model)
+describe : List UniProp -> String
+describe ps =
+    "The " ++ flattenTree (describeTree ps)
 
 
 update : Msg -> Model -> (Model, Cmd Msg)
@@ -479,18 +486,19 @@ update msg model =
         ObjSelect i o ->
             let
                 d = List.filter (\x -> x /= o) model.objs
-                descriptors = selectDescriptors o d model
+                possProps = getUniPropListWithLandmarks model
+                descriptors = selectDescriptors o d possProps model
             in
             ({ model
                  | textDisplay =
-                   [ toString <| getProps o d (getUniPropList d) model
+                   [ toString <| getProps o possProps model
                    , toString <| descriptors
-                   , toString <| getProps o d descriptors model
+                   , toString <| getProps o descriptors model
                    --, toString <| gradePropsWithoutContext o d (List.drop 1 descriptors) model
-                   , toString <| gradePropsWithoutContext o d descriptors model
+                   , toString <| gradePropsWithoutContext o descriptors model
                    , toString <| gradeProps o d descriptors model
-                   , toString <| describeTree descriptors d model
-                   , toString <| describe descriptors d model
+                   , toString <| describeTree descriptors
+                   , toString <| describe descriptors
                    ]
                  , selectedIndex = i
              }
@@ -498,18 +506,32 @@ update msg model =
         StartGeneration ->
             ({model | objs = []}, genObj model)
         ObjGenerated o ->
-            let
-                modelp = if isValidObj model o
-                         then {model | objs = o::model.objs}
-                         else model
-                nextAction = if List.length modelp.objs < modelp.numObjects
-                             then genObj modelp
-                             else Random.generate SelectIndex
-                                 <| Random.int 0
-                                 <| List.length modelp.objs
-            in
-            (modelp, nextAction)
-        SelectIndex i -> ({model | selectedIndex = i}, Cmd.none)
+            if isValidObj model o
+            then
+                let
+                    modelp = if isValidObj model o
+                             then {model | objs = o::model.objs}
+                             else model
+                in
+                if List.length model.objs < model.numObjects
+                then (modelp, genObj model)
+                else ({modelp | objUniScores =
+                           List.map
+                           (\x ->
+                                let
+                                    os = (List.filter (\y -> y /= x) modelp.objs)
+                                    l = selectDescriptors
+                                        x
+                                        os
+                                        uniPropList
+                                        model
+                                in
+                                (l, gradeProps x os l modelp)
+                           )
+                           modelp.objs
+                           |> Debug.log "objUniScores"
+                      }, Cmd.none)
+            else (model, genObj model)
         ChooseAlgorithm s -> ({model | algorithm =
                                    case s of
                                        "Fuzzy" -> Fuzzy 0.7
