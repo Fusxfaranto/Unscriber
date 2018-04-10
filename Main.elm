@@ -76,8 +76,8 @@ init =
             , secretDescription = ""
             , demoState = DemoStarted
             , algorithm = Fuzzy 0.05
-            , gridSize = 35
-            , numObjects = 21
+            , gridSize = 44
+            , numObjects = 34
             , displayMode = Demo
             }
     in
@@ -239,7 +239,7 @@ unconditionalProps = [ USquare
 
 
 rateDist : (Obj -> Obj -> Float) -> Obj -> Obj -> Float
-rateDist f a b = ((f a b) / (dist a b) ^ 2) / 5
+rateDist f a b = ((f a b) / (dist a b) ^ 2)
 
 
 getUniProp : Obj -> UniProp -> Model -> Float
@@ -249,24 +249,20 @@ getUniProp o p model =
     in
     case p of
         UBiProp bp other (_, otherScore) ->
-            case model.algorithm of
-                Incremental t -> 0 -- TODO can probably do bivalence with landmarks
-                Fuzzy t ->
-                    if o == other
-                    then 0 -- TODO i think this is a good starting point but not sure if this is the best way to handle this
-                    else
-                        let
-                            bScore =
-                                (case bp of
-                                     BLeft  -> -(rateDist hDist o other) * g
-                                     BRight -> rateDist hDist o other * g
-                                     BBelow -> -(rateDist vDist o other) * g
-                                     BAbove -> rateDist vDist o other * g
-                                )
-                                   |> logistic
-                                   --|> Debug.log "bScore"
-                        in
-                            otherScore * bScore -- TODO something smarter
+            if o == other
+            then 0 -- TODO i think this is a good starting point but not sure if this is the best way to handle this
+            else
+                let
+                    bScore =
+                        (case bp of
+                             BLeft  -> -(rateDist hDist o other) * g
+                             BRight -> rateDist hDist o other * g
+                             BBelow -> -(rateDist vDist o other) * g
+                             BAbove -> rateDist vDist o other * g
+                        )
+                           |> logistic
+                in
+                    otherScore * bScore -- TODO something smarter
         USquare -> if o.objType == Square then 1 else 0
         UCircle -> if o.objType == Circle then 1 else 0
         UGreen  -> if o.color == Green then 1 else 0
@@ -462,7 +458,7 @@ describeProp p =
             in
                 ( Branch
                      leaf
-                     (describeTree otherProps)
+                     (describeTree otherProps False)
                 , Right
                 )
         USquare -> (Leaf "square", Left)
@@ -479,15 +475,18 @@ describeProp p =
         UMiddle -> (Leaf "middle", Left)
 
 
-describeTree : List UniProp -> SyntaxTree
-describeTree ps =
+describeTree : List UniProp -> Bool -> SyntaxTree
+describeTree ps hasRight =
     case ps of
         []    -> Leaf "object"
         USquare::[] -> Leaf "square"
         UCircle::[] -> Leaf "circle"
         x::xs -> case describeProp x of
-                     (t, Left) -> Branch t (describeTree xs)
-                     (t, Right) -> Branch (describeTree xs) t
+                     (t, Left) -> Branch t (describeTree xs hasRight)
+                     (t, Right) ->
+                         if hasRight
+                         then Branch (Branch (describeTree xs True) t) (Leaf "and")
+                         else Branch (describeTree xs True) t
 
 
 flattenTree : SyntaxTree -> String
@@ -499,7 +498,7 @@ flattenTree t =
 
 describe : List UniProp -> String
 describe ps =
-    "the " ++ flattenTree (describeTree ps)
+    "the " ++ flattenTree (describeTree ps False)
 
 
 update : Msg -> Model -> (Model, Cmd Msg)
@@ -521,7 +520,7 @@ update msg model =
                            --, toString <| gradePropsWithoutContext o d (List.drop 1 descriptors) model
                            , toString <| gradePropsWithoutContext o descriptors model
                            , toString <| gradeProps o d descriptors model
-                           , toString <| describeTree descriptors
+                           , toString <| describeTree descriptors False
                            , toString <| describe descriptors
                            ]
                          , selectedIndex = i
@@ -796,7 +795,7 @@ view model =
                                          ((\x ->
                                                Html.option
                                                [ value x
-                                               , Attributes.selected (x == "21")
+                                               , Attributes.selected (x == "34")
                                                ]
                                                [Html.text x]) << toString)
                                          [2, 3, 5, 8, 13, 21, 34, 55, 89]
