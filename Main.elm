@@ -2,7 +2,7 @@ module Unscriber exposing (main)
 
 import Collage exposing (Collage, defaultLineStyle, styled, uniform, rotate, shift, shiftX, shiftY)
 import Collage.Events exposing (onClick)
-import Collage.Layout exposing (align, bottomLeft, center, spacer, stack, vertical)
+import Collage.Layout exposing (align, bottomLeft, center, spacer, stack, vertical, impose)
 import Collage.Render
 import Color exposing (Color, green, orange, blue, gray, red)
 import Css
@@ -10,7 +10,7 @@ import Css
 import Html.Styled as Html exposing (Html, fromUnstyled)
 import Html.Styled.Attributes as Attributes exposing (css, type_, value)
 import Html.Styled.Events as Events exposing (onInput)
-import List.Extra exposing (lift2, maximumBy)
+import List.Extra exposing (lift2, maximumBy, (!!))
 import Random as Random exposing (Generator, generate)
 
 
@@ -40,14 +40,27 @@ type Algorithm = Incremental Float
                | Fuzzy Float
 
 
+type DisplayMode = DebugView
+                 | Demo
+
+
+type DemoState = DemoStarted
+               | DemoWrong
+               | DemoRight
+
+
 type alias Model =
     { textDisplay: List String
     , objs: List Obj
     , objUniScores : List (List UniProp, Float)
-    , selectedIndex: Int
+    , selectedIndex : Int
+    , secretIndex : Int
+    , secretDescription : String
+    , demoState : DemoState
     , algorithm: Algorithm
     , gridSize : Int
     , numObjects : Int
+    , displayMode : DisplayMode
     }
 
 
@@ -59,12 +72,16 @@ init =
             , objs = []
             , objUniScores = []
             , selectedIndex = -1
-            , algorithm = Fuzzy 0.7
+            , secretIndex = -1
+            , secretDescription = ""
+            , demoState = DemoStarted
+            , algorithm = Fuzzy 0.05
             , gridSize = 35
-            , numObjects = 30
+            , numObjects = 21
+            , displayMode = Demo
             }
     in
-        (model, genObj model)
+        update StartGeneration model
 
 
 
@@ -76,6 +93,8 @@ type Msg = ObjSelect Int Obj
          | StartGeneration
          | ChooseAlgorithm String
          | SetNumObjects String
+         | ChooseDisplayMode String
+         | GenerateSecret Int
 
 
 maxSize : Model -> Int
@@ -318,7 +337,7 @@ gradeProps o os l model =
                 of
                     Nothing -> Debug.crash "probably unreachable"
                     Just x  ->
-                        oScore - x
+                        oScore - x -- TODO max?
 
 
 gradeSingleProp : Obj -> List Obj -> UniProp -> Float -> List Float -> Model -> (Float, List Float)
@@ -339,7 +358,7 @@ gradeSingleProp o os p oScore osScores model =
             of
                 Nothing -> Debug.crash "probably unreachable"
                 Just x  ->
-                    (oScoreNew - x, osScoresNew)
+                    (oScoreNew - x, osScoresNew) -- TODO max?
 
 
 
@@ -381,31 +400,34 @@ selectDescriptors o os possProps model =
                 -- TODO filter out distractors that hit zero or go below some threshold?
                 select : List UniProp -> List UniProp -> Float -> List Float -> Float -> List UniProp
                 select selected unselected oScore osScores oScoreC =
-                    let
-                        newP =
-                            maximumBy
-                            (\x -> Tuple.first (gradeSingleProp o os x oScore osScores model))
-                            unselected
-                                |> Debug.log "newP"
-                    in
-                        case newP of
-                            Nothing -> Debug.crash "this shouldn't ever happen in practice" -- TODO probably remove
-                            Just p ->
-                                let
-                                    newSelected = p::selected
-                                    newUnselected = List.filter (\x -> x /= p) unselected
-                                    (oScoreCNew, osScoresNew) = gradeSingleProp o os p oScore osScores model
-                                                              |> Debug.log "(oScoreCNew, osScoresNew)"
-                                in
-                                    if oScoreCNew <= oScoreC
-                                    then selected
-                                    else
-                                        select
-                                        newSelected
-                                        newUnselected
-                                        (fuzzyTNorm oScore (getUniProp o p model))
-                                        osScoresNew
-                                        oScoreCNew
+                    if oScoreC > t
+                    then selected
+                    else
+                        let
+                            newP =
+                                maximumBy
+                                (\x -> Tuple.first (gradeSingleProp o os x oScore osScores model))
+                                unselected
+                                --|> Debug.log "newP"
+                        in
+                            case newP of
+                                Nothing -> Debug.crash "this shouldn't ever happen in practice" -- TODO probably remove
+                                Just p ->
+                                    let
+                                        newSelected = p::selected
+                                        newUnselected = List.filter (\x -> x /= p) unselected
+                                        (oScoreCNew, osScoresNew) = gradeSingleProp o os p oScore osScores model
+                                                              --|> Debug.log "(oScoreCNew, osScoresNew)"
+                                    in
+                                        if oScoreCNew <= oScoreC
+                                        then selected
+                                        else
+                                            select
+                                            newSelected
+                                            newUnselected
+                                            (fuzzyTNorm oScore (getUniProp o p model))
+                                            osScoresNew
+                                            oScoreCNew
             in
                 select
                 --(filterDs os unconditionals)
@@ -477,34 +499,49 @@ flattenTree t =
 
 describe : List UniProp -> String
 describe ps =
-    "The " ++ flattenTree (describeTree ps)
+    "the " ++ flattenTree (describeTree ps)
 
 
 update : Msg -> Model -> (Model, Cmd Msg)
 update msg model =
     case msg of
         ObjSelect i o ->
-            let
-                d = List.filter (\x -> x /= o) model.objs
-                possProps = getUniPropListWithLandmarks model
-                descriptors = selectDescriptors o d possProps model
-            in
-            ({ model
-                 | textDisplay =
-                   [ toString <| getProps o possProps model
-                   , toString <| descriptors
-                   , toString <| getProps o descriptors model
-                   --, toString <| gradePropsWithoutContext o d (List.drop 1 descriptors) model
-                   , toString <| gradePropsWithoutContext o descriptors model
-                   , toString <| gradeProps o d descriptors model
-                   , toString <| describeTree descriptors
-                   , toString <| describe descriptors
-                   ]
-                 , selectedIndex = i
-             }
-            , Cmd.none)
+            case model.displayMode of
+                DebugView ->
+                    let
+                        d = List.filter (\x -> x /= o) model.objs
+                        possProps = getUniPropListWithLandmarks model
+                        descriptors = selectDescriptors o d possProps model
+                    in
+                    ({ model
+                         | textDisplay =
+                           [ toString <| getProps o possProps model
+                           , toString <| descriptors
+                           , toString <| getProps o descriptors model
+                           --, toString <| gradePropsWithoutContext o d (List.drop 1 descriptors) model
+                           , toString <| gradePropsWithoutContext o descriptors model
+                           , toString <| gradeProps o d descriptors model
+                           , toString <| describeTree descriptors
+                           , toString <| describe descriptors
+                           ]
+                         , selectedIndex = i
+                     }
+                    , Cmd.none)
+                Demo ->
+                    if model.demoState == DemoStarted
+                    then ({model
+                              | selectedIndex = i
+                              , demoState = if i == model.secretIndex
+                                            then DemoRight
+                                            else DemoWrong
+                          }, Cmd.none)
+                    else (model, Cmd.none)
         StartGeneration ->
-            ({model | objs = []}, genObj model)
+            ({model
+                 | objs = []
+                 , selectedIndex = -1
+                 , demoState = DemoStarted
+             }, genObj model)
         ObjGenerated o ->
             if isValidObj model o
             then
@@ -513,7 +550,7 @@ update msg model =
                              then {model | objs = o::model.objs}
                              else model
                 in
-                if List.length model.objs < model.numObjects
+                if List.length modelp.objs < model.numObjects
                 then (modelp, genObj model)
                 else ({modelp | objUniScores =
                            List.map
@@ -529,19 +566,45 @@ update msg model =
                                 (l, gradeProps x os l modelp)
                            )
                            modelp.objs
-                           |> Debug.log "objUniScores"
-                      }, Cmd.none)
+                           --|> Debug.log "objUniScores"
+                      }
+                     , generate GenerateSecret (Random.int 0 (model.numObjects - 1)))
             else (model, genObj model)
-        ChooseAlgorithm s -> ({model | algorithm =
-                                   case s of
-                                       "Fuzzy" -> Fuzzy 0.7
-                                       "Incremental" -> Incremental 0.65
-                                       _ -> Debug.crash "bad option"
-                              }, Cmd.none)
+        ChooseAlgorithm s ->
+            update (GenerateSecret model.secretIndex)
+            {model | algorithm =
+                 case s of
+                     "Fuzzy (partial specificity)" -> Fuzzy 0.05
+                     "Fuzzy (full specificity)" -> Fuzzy 100
+                     "Incremental (low threshold)" -> Incremental 0.55
+                     "Incremental (high threshold)" -> Incremental 0.8
+                     _ -> Debug.crash "bad option"
+            }
         SetNumObjects s ->
             case String.toInt s of
                 Err _ -> (model, Cmd.none)
-                Ok n  -> ({model | numObjects = n, objs = []}, genObj model)
+                Ok n  -> update StartGeneration {model | numObjects = n}
+        ChooseDisplayMode s -> ({model
+                                    | displayMode =
+                                        case s of
+                                            "Debug" -> DebugView
+                                            "Demo"  -> Demo
+                                            _ -> Debug.crash "bad option"
+                                     , selectedIndex = -1
+                                }, Cmd.none)
+        GenerateSecret i ->
+            let
+                o = case model.objs !! i of
+                        Just x  -> x
+                        Nothing -> Debug.crash "should be unreachable"
+                d = List.filter (\x -> x /= o) model.objs
+                possProps = getUniPropListWithLandmarks model
+                descriptors = selectDescriptors o d possProps model
+            in
+            ({model
+                 | secretIndex = i
+                 , secretDescription = describe descriptors
+             }, Cmd.none)
 
 
 
@@ -585,8 +648,16 @@ drawObj model i o =
                     Square -> (Collage.square dim)
                     Circle -> (Collage.circle <| dim / 2)
         lineStyle = if i == model.selectedIndex
-                    then {defaultLineStyle | fill = (uniform red)}
-                    else defaultLineStyle
+                    then {defaultLineStyle
+                             | fill = (uniform red)
+                             , thickness = Collage.semithick}
+                    else if i == model.secretIndex &&
+                            model.demoState == DemoWrong &&
+                            model.displayMode == Demo
+                         then {defaultLineStyle
+                                  | dashPattern = [(6, 3)]
+                                  , thickness = Collage.thick}
+                         else defaultLineStyle
         style = styled (uniform <| objColorToColor o.color, lineStyle)
         offsets = ((toFloat o.x) * spacerLen, (toFloat o.y) * spacerLen)
     in
@@ -605,21 +676,22 @@ renderCollage model =
     let
         grid = drawGrid model.gridSize
         base =
-            stack
-            [ drawScene model
-            , grid
-            ]
+            impose
+            (drawScene model)
+            grid
+
              |> center
+        background =
+            stack
+            [ Collage.outlined
+                  defaultLineStyle
+                  (Collage.square (Collage.Layout.width grid + 10))
+            , Collage.filled
+                  (uniform Color.white)
+                  (Collage.square (Collage.Layout.width grid + 50))
+            ]
     in
-        stack
-        [ base
-        , Collage.outlined
-            defaultLineStyle
-            (Collage.square (Collage.Layout.width grid + 10))
-        , Collage.filled
-            (uniform Color.white)
-            (Collage.square (Collage.Layout.width grid + 50))
-        ]
+        impose base background
             --|> Collage.scale 1
             |> Collage.Render.svg
             |> fromUnstyled
@@ -644,28 +716,57 @@ view model =
                     --     (List.map
                     --          (\t -> Html.p [] [Html.text t])
                     --          model.textDisplay)
-                    , Html.td []
-                        [ Html.div
-                              [ css
-                                [ Css.overflow Css.scroll
-                                , Css.height (Css.px (toFloat model.gridSize * spacerLen))
-                                ]
-                              ]
-                              [ Html.pre []
-                                    [ Html.text
-                                          (String.join "\n\n" model.textDisplay)
+                    , Html.td [] [Html.div [css [Css.width (Css.px (spacerLen * 2))]] []]
+                    , Html.td
+                        [ css
+                          [ Css.verticalAlign Css.top
+                          ]
+                        ]
+                        [ case model.displayMode of
+                              DebugView ->
+                                  Html.div
+                                  [ css
+                                    [ Css.overflow Css.scroll
+                                    , Css.height (Css.px (toFloat model.gridSize * spacerLen))
+                                    , Css.width (Css.px (toFloat model.gridSize * spacerLen))
                                     ]
-                              ]
+                                  ]
+                                  [ Html.pre []
+                                        [ Html.text
+                                              (String.join "\n\n" model.textDisplay)
+                                        ]
+                                  ]
+                              Demo ->
+                                  Html.div
+                                  [ css
+                                    [ Css.fontSize (Css.px 36)
+                                    , Css.verticalAlign Css.top
+                                    ]
+                                  ]
+                                  [ Html.p [] [Html.text <| "Click on " ++ model.secretDescription ++ "."]
+                                  , Html.p [] [
+                                         Html.text <|
+                                             case model.demoState of
+                                                 DemoStarted -> ""
+                                                 DemoRight -> "Hooray!  You got it!  Click the \"Regenerate\" button to play again."
+                                                 DemoWrong -> "Oops, not quite...   Click the \"Regenerate\" button to play again."
+                                        ]
+                                  ]
                         ]
                     ]
               ]
         --, Html.br [] []
         , Html.div []
-            [ Html.table []
+            [ Html.table
+                  [ css
+                    [ Css.borderSpacing (Css.px 10)
+                    ]
+                  ]
                   [ Html.tr []
                         [ Html.td [] []
                         , Html.td [] [Html.text "Algorithm:"]
                         , Html.td [] [Html.text "Number of Objects:"]
+                        , Html.td [] [Html.text "Display Mode:"]
                         ]
 
                   , Html.tr []
@@ -680,7 +781,11 @@ view model =
                                     ]
                                     (List.map
                                          (\x -> Html.option [value x] [Html.text x])
-                                         ["Fuzzy", "Incremental"]
+                                         [ "Fuzzy (partial specificity)"
+                                         , "Fuzzy (full specificity)"
+                                         , "Incremental (low threshold)"
+                                         , "Incremental (high threshold)"
+                                         ]
                                     )
                               ]
                         , Html.td []
@@ -691,10 +796,19 @@ view model =
                                          ((\x ->
                                                Html.option
                                                [ value x
-                                               , Attributes.selected (x == "30")
+                                               , Attributes.selected (x == "21")
                                                ]
                                                [Html.text x]) << toString)
-                                         [5, 6, 7, 8, 9, 10, 20, 30, 40]
+                                         [2, 3, 5, 8, 13, 21, 34, 55, 89]
+                                    )
+                              ]
+                        , Html.td []
+                              [ Html.select
+                                    [ onInput ChooseDisplayMode
+                                    ]
+                                    (List.map
+                                         (\x -> Html.option [value x] [Html.text x])
+                                         ["Demo", "Debug"]
                                     )
                               ]
                         ]
