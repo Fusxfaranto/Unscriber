@@ -250,7 +250,7 @@ getUniProp o p model =
     case p of
         UBiProp bp other (_, otherScore) ->
             if o == other
-            then 0 -- TODO i think this is a good starting point but not sure if this is the best way to handle this
+            then 0
             else
                 let
                     bScore =
@@ -262,7 +262,7 @@ getUniProp o p model =
                         )
                            |> logistic
                 in
-                    otherScore * bScore -- TODO something smarter
+                    otherScore * bScore
         USquare -> if o.objType == Square then 1 else 0
         UCircle -> if o.objType == Circle then 1 else 0
         UGreen  -> if o.color == Green then 1 else 0
